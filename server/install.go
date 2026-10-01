@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"html/template"
 	"io"
@@ -14,7 +13,6 @@ import (
 	"emperror.dev/errors"
 	"github.com/apex/log"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 
@@ -253,66 +251,11 @@ func (ip *InstallationProcess) writeScriptToDisk() error {
 
 // Pulls the docker image to be used for the installation container.
 func (ip *InstallationProcess) pullInstallationImage() error {
-	registry, registryAuth := config.Get().Docker.RegistryCredentialsForImage(ip.Script.ContainerImage)
-	if registryAuth != nil {
-		log.WithField("registry", registry).Debug("using authentication for registry")
-	}
-
-	// Get the ImagePullOptions.
-	imagePullOptions := image.PullOptions{All: false}
-	if registryAuth != nil {
-		b64, err := registryAuth.Base64()
-		if err != nil {
-			log.WithError(err).Error("failed to get registry auth credentials")
-		}
-
-		// b64 is a string so if there is an error it will just be empty, not nil.
-		imagePullOptions.RegistryAuth = b64
-	}
-
-	r, err := ip.client.ImagePull(ip.Server.Context(), ip.Script.ContainerImage, imagePullOptions)
-	if err != nil {
-		images, ierr := ip.client.ImageList(ip.Server.Context(), image.ListOptions{})
-		if ierr != nil {
-			// Well damn, something has gone really wrong here, just go ahead and abort there
-			// isn't much anything we can do to try and self-recover from this.
-			return ierr
-		}
-
-		for _, img := range images {
-			for _, t := range img.RepoTags {
-				if t != ip.Script.ContainerImage {
-					continue
-				}
-
-				log.WithFields(log.Fields{
-					"image": ip.Script.ContainerImage,
-					"err":   err.Error(),
-				}).Warn("unable to pull requested image from remote source, however the image exists locally")
-
-				// Okay, we found a matching container image, in that case just go ahead and return
-				// from this function, since there is nothing else we need to do here.
-				return nil
-			}
-		}
-
-		return err
-	}
-	defer r.Close()
-
-	log.WithField("image", ip.Script.ContainerImage).Debug("pulling docker image... this could take a bit of time")
-
-	// Block continuation until the image has been pulled successfully.
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		log.Debug(scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	return nil
+	ctx, cancel := context.WithTimeout(ip.Server.Context(), 15*time.Minute)
+	defer cancel()
+	return docker.PullImage(ctx, ip.client, ip.Script.ContainerImage, func(line string) {
+		log.Debug(line)
+	})
 }
 
 // BeforeExecute runs before the container is executed. This pulls down the
@@ -417,7 +360,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		Tty:          true,
 		Cmd:          []string{ip.Script.Entrypoint, "/mnt/install/install.sh"},
 		Image:        ip.Script.ContainerImage,
-		Env:          ip.Server.GetEnvironmentVariables(),
+		Env:          config.Get().Docker.Proxy.MergeInstallEnv(ip.Server.GetEnvironmentVariables()),
 		Labels: map[string]string{
 			"Service":       "Pterodactyl",
 			"ContainerType": "server_installer",

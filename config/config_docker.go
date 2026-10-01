@@ -57,6 +57,13 @@ type DockerConfiguration struct {
 	// Registries .
 	Registries map[string]RegistryConfiguration `json:"registries" yaml:"registries"`
 
+	// Proxy routes installer scripts and selected image pulls through an HTTP
+	// proxy. The Docker daemon pulls images itself and ignores a proxy set only
+	// on Wings, so a matched image is downloaded by Wings and loaded into Docker.
+	// A registry set to "-" stays on the daemon pull, which still uses the
+	// daemon's registry mirrors.
+	Proxy DockerProxyConfiguration `json:"proxy" yaml:"proxy"`
+
 	// TmpfsSize specifies the size for the /tmp directory mounted into containers. Please be
 	// aware that Docker utilizes the host's system memory for this value, and that we do not
 	// keep track of the space used there, so avoid allocating too much to a server.

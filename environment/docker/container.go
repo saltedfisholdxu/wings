@@ -11,9 +11,7 @@ import (
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
-	"github.com/buger/jsonparser"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
@@ -369,75 +367,9 @@ func (e *Environment) ensureImageExists(img string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	registry, registryAuth := config.Get().Docker.RegistryCredentialsForImage(img)
-	if registryAuth != nil {
-		log.WithField("registry", registry).Debug("using authentication for registry")
-	}
-
-	// Get the ImagePullOptions.
-	imagePullOptions := image.PullOptions{All: false}
-	if registryAuth != nil {
-		b64, err := registryAuth.Base64()
-		if err != nil {
-			log.WithError(err).Error("failed to get registry auth credentials")
-		}
-
-		// b64 is a string so if there is an error it will just be empty, not nil.
-		imagePullOptions.RegistryAuth = b64
-	}
-
-	out, err := e.client.ImagePull(ctx, img, imagePullOptions)
-	if err != nil {
-		images, ierr := e.client.ImageList(ctx, image.ListOptions{})
-		if ierr != nil {
-			// Well damn, something has gone really wrong here, just go ahead and abort there
-			// isn't much anything we can do to try and self-recover from this.
-			return errors.Wrap(ierr, "environment/docker: failed to list images")
-		}
-
-		for _, img2 := range images {
-			for _, t := range img2.RepoTags {
-				if t != img {
-					continue
-				}
-
-				log.WithFields(log.Fields{
-					"image":        img,
-					"container_id": e.Id,
-					"err":          err.Error(),
-				}).Warn("unable to pull requested image from remote source, however the image exists locally")
-
-				// Okay, we found a matching container image, in that case just go ahead and return
-				// from this function, since there is nothing else we need to do here.
-				return nil
-			}
-		}
-
-		return errors.Wrapf(err, "environment/docker: failed to pull \"%s\" image for server", img)
-	}
-	defer out.Close()
-
-	log.WithField("image", img).Debug("pulling docker image... this could take a bit of time")
-
-	// I'm not sure what the best approach here is, but this will block execution until the image
-	// is done being pulled, which is what we need.
-	scanner := bufio.NewScanner(out)
-
-	for scanner.Scan() {
-		b := scanner.Bytes()
-		status, _ := jsonparser.GetString(b, "status")
-		progress, _ := jsonparser.GetString(b, "progress")
-
-		e.Events().Publish(environment.DockerImagePullStatus, status+" "+progress)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	log.WithField("image", img).Debug("completed docker image pull")
-
-	return nil
+	return PullImage(ctx, e.client, img, func(status string) {
+		e.Events().Publish(environment.DockerImagePullStatus, status)
+	})
 }
 
 func (e *Environment) convertMounts() []mount.Mount {
