@@ -126,6 +126,34 @@ func zipWithEmptyDir() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func TestFilesystem_RecognizeArchive(t *testing.T) {
+	fs, rfs := NewFs()
+	t.Cleanup(func() { _ = fs.TruncateRootDirectory() })
+
+	if err := fs.RecognizeArchive(context.Background(), "/", "missing.zip"); err == nil {
+		t.Fatal("expected a missing archive to fail")
+	}
+
+	content, err := os.ReadFile("./testdata/test.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rfs.CreateServerFile("./test.zip", content); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.RecognizeArchive(context.Background(), "/", "test.zip"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rfs.CreateServerFile("./notes.txt", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	err = fs.RecognizeArchive(context.Background(), "/", "notes.txt")
+	if !IsErrorCode(err, ErrCodeUnknownArchive) {
+		t.Fatalf("expected unknown archive, got %v", err)
+	}
+}
+
 // A GBK path like the CustomNPCs dialog archive must survive the disk check
 // and land on disk as UTF-8. UTF-8 stored without the ZIP flag stays UTF-8.
 func TestFilesystem_DecompressLegacyZipNames(t *testing.T) {

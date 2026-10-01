@@ -63,6 +63,10 @@ type Server struct {
 	installing   *system.AtomicBool
 	transferring *system.AtomicBool
 	restoring    *system.AtomicBool
+	// decompressing stops a second archive extract from starting while one is
+	// still running. The HTTP handler returns before a large extract finishes,
+	// so this flag, not the request, owns that work.
+	decompressing *system.AtomicBool `json:"-"`
 
 	// The console throttler instance used to control outputs.
 	throttler    *ConsoleThrottle
@@ -84,13 +88,14 @@ type Server struct {
 func New(client remote.Client) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := Server{
-		ctx:          ctx,
-		ctxCancel:    &cancel,
-		client:       client,
-		installing:   system.NewAtomicBool(false),
-		transferring: system.NewAtomicBool(false),
-		restoring:    system.NewAtomicBool(false),
-		powerLock:    system.NewLocker(),
+		ctx:           ctx,
+		ctxCancel:     &cancel,
+		client:        client,
+		installing:    system.NewAtomicBool(false),
+		transferring:  system.NewAtomicBool(false),
+		restoring:     system.NewAtomicBool(false),
+		decompressing: system.NewAtomicBool(false),
+		powerLock:     system.NewLocker(),
 		sinks: map[system.SinkName]*system.SinkPool{
 			system.LogSink:     system.NewSinkPool(),
 			system.InstallSink: system.NewSinkPool(),
@@ -144,6 +149,17 @@ func (s *Server) CtxCancel() {
 // application is stopped or if the server gets deleted.
 func (s *Server) Context() context.Context {
 	return s.ctx
+}
+
+// BeginDecompression marks this server as extracting an archive. It returns
+// false when an extract is already in progress.
+func (s *Server) BeginDecompression() bool {
+	return s.decompressing.SwapIf(true)
+}
+
+// EndDecompression clears the in-progress extract flag.
+func (s *Server) EndDecompression() {
+	s.decompressing.Store(false)
 }
 
 // Returns all of the environment variables that should be assigned to a running

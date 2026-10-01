@@ -453,6 +453,12 @@ func postServerCompressFiles(c *gin.Context) {
 // postServerDecompressFiles receives the HTTP request and starts the process
 // of unpacking an archive that exists on the server into the provided RootPath
 // for the server.
+//
+// The extract itself runs after this handler returns. A large archive takes
+// longer than the panel or a proxy will wait, and once that client gives up
+// the request is over. Doing the work in the background, on the server
+// context, keeps the extract running and leaves the server able to accept
+// another one when this one finishes.
 func postServerDecompressFiles(c *gin.Context) {
 	var data struct {
 		RootPath string `json:"root"`
@@ -464,9 +470,21 @@ func postServerDecompressFiles(c *gin.Context) {
 
 	s := middleware.ExtractServer(c)
 	lg := middleware.ExtractLogger(c).WithFields(log.Fields{"root_path": data.RootPath, "file": data.File})
-	lg.Debug("checking if space is available for file decompression")
-	err := s.Filesystem().SpaceAvailableForDecompression(context.Background(), data.RootPath, data.File)
-	if err != nil {
+	if !s.BeginDecompression() {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
+			"error": "An archive is already being decompressed on this server. Wait for it to finish, then try again.",
+		})
+		return
+	}
+
+	release := true
+	defer func() {
+		if release {
+			s.EndDecompression()
+		}
+	}()
+
+	if err := s.Filesystem().RecognizeArchive(c.Request.Context(), data.RootPath, data.File); err != nil {
 		if filesystem.IsErrorCode(err, filesystem.ErrCodeUnknownArchive) {
 			lg.WithField("error", err).Warn("failed to decompress file: unknown archive format")
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "The archive provided is in a format Wings does not understand."})
@@ -476,21 +494,46 @@ func postServerDecompressFiles(c *gin.Context) {
 		return
 	}
 
-	lg.Info("starting file decompression")
-	if err := s.Filesystem().DecompressFile(context.Background(), data.RootPath, data.File); err != nil {
-		// If the file is busy for some reason just return a nicer error to the user since there is not
-		// much we specifically can do. They'll need to stop the running server process in order to overwrite
-		// a file like this.
-		if strings.Contains(err.Error(), "text file busy") {
-			lg.WithField("error", errors.WithStackIf(err)).Warn("failed to decompress file: text file busy")
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
-				"error": "One or more files this archive is attempting to overwrite are currently in use by another process. Please try again.",
-			})
+	rootPath := data.RootPath
+	file := data.File
+	release = false
+	go func() {
+		defer s.EndDecompression()
+
+		lg := s.Log().WithFields(log.Fields{"root_path": rootPath, "file": file})
+		ctx := s.Context()
+		s.Events().Publish(server.DaemonMessageEvent, "Decompressing "+file+". Large archives keep going after the panel stops waiting.")
+
+		lg.Debug("checking if space is available for file decompression")
+		err := s.Filesystem().SpaceAvailableForDecompression(ctx, rootPath, file)
+		if err != nil {
+			if filesystem.IsErrorCode(err, filesystem.ErrCodeUnknownArchive) {
+				lg.WithField("error", err).Warn("failed to decompress file: unknown archive format")
+			} else {
+				lg.WithField("error", err).Error("failed to decompress file")
+			}
+			s.Events().Publish(server.DaemonMessageEvent, "Failed to decompress "+file+": "+err.Error())
 			return
 		}
-		middleware.CaptureAndAbort(c, err)
-		return
-	}
+
+		lg.Info("starting file decompression")
+		if err := s.Filesystem().DecompressFile(ctx, rootPath, file); err != nil {
+			// If the file is busy for some reason just return a nicer error to the user since there is not
+			// much we specifically can do. They'll need to stop the running server process in order to overwrite
+			// a file like this.
+			if strings.Contains(err.Error(), "text file busy") {
+				lg.WithField("error", errors.WithStackIf(err)).Warn("failed to decompress file: text file busy")
+				s.Events().Publish(server.DaemonMessageEvent, "Failed to decompress "+file+": a file in the archive is in use by another process. Stop the server and try again.")
+				return
+			}
+			lg.WithField("error", errors.WithStackIf(err)).Error("failed to decompress file")
+			s.Events().Publish(server.DaemonMessageEvent, "Failed to decompress "+file+": "+err.Error())
+			return
+		}
+		lg.Info("finished file decompression")
+		s.Events().Publish(server.DaemonMessageEvent, "Finished decompressing "+file+".")
+	}()
+
 	c.Status(http.StatusNoContent)
 }
 

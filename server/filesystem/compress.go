@@ -103,6 +103,25 @@ func (fs *Filesystem) archiverFileSystem(ctx context.Context, p string) (iofs.FS
 	return nil, nil, archives.NoMatch
 }
 
+// RecognizeArchive reports whether the file is an archive Wings can read.
+// It only inspects the header, so it stays cheap for a large archive.
+func (fs *Filesystem) RecognizeArchive(ctx context.Context, dir string, file string) error {
+	f, err := fs.unixFS.Open(filepath.Join(dir, file))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	format, _, err := archives.Identify(ctx, filepath.Base(file), f)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return err
+	}
+	if format == nil || errors.Is(err, archives.NoMatch) {
+		return newFilesystemError(ErrCodeUnknownArchive, err)
+	}
+	return nil
+}
+
 // SpaceAvailableForDecompression looks through a given archive and determines
 // if decompressing it would put the server over its allocated disk space limit.
 func (fs *Filesystem) SpaceAvailableForDecompression(ctx context.Context, dir string, file string) error {
